@@ -38,10 +38,14 @@ if Code.ensure_loaded?(Mariaex) do
         %{__struct__: _} = value ->
           value
         %{} = value ->
-          Ecto.Adapter.json_library().encode!(value)
+          json_library().encode!(value)
         value ->
           value
       end
+    end
+
+    defp json_library do
+      Application.fetch_env!(:ecto, :json_library)
     end
 
     def to_constraints(%Mariaex.Error{mariadb: %{code: 1062, message: message}}) do
@@ -94,14 +98,9 @@ if Code.ensure_loaded?(Mariaex) do
       sources = create_names(query)
       {from, name} = get_source(query, sources, 0, from)
 
-      fields = if prefix do
-        update_fields(:on_conflict, query, sources)
-      else
-        update_fields(:update, query, sources)
-      end
-
       join   = join(query, sources)
       prefix = prefix || ["UPDATE ", from, " AS ", name, join, " SET "]
+      fields = update_fields(query, sources)
       where  = where(query, sources)
 
       IO.iodata_to_binary([prefix, fields | where])
@@ -218,32 +217,23 @@ if Code.ensure_loaded?(Mariaex) do
       [" FROM ", from, " AS " | name]
     end
 
-    defp update_fields(type, %Query{updates: updates} = query, sources) do
-     fields = for(%{expr: expr} <- updates,
-                   {op, kw} <- expr,
-                   {key, value} <- kw,
-                   do: update_op(op, update_key(type, key, query, sources), value, sources, query))
-      Enum.intersperse(fields, ", ")
+    defp update_fields(%Query{updates: updates} = query, sources) do
+      for(%{expr: expr} <- updates,
+          {op, kw} <- expr,
+          {key, value} <- kw,
+          do: update_op(op, key, value, sources, query)) |> Enum.intersperse(", ")
     end
 
-    defp update_key(:update, key, %Query{from: from} = query, sources) do
-      {_from, name} = get_source(query, sources, 0, from)
-
-      [name, ?. | quote_name(key)]
-    end
-    defp update_key(:on_conflict, key, _query, _sources) do
-      quote_name(key)
+    defp update_op(:set, key, value, sources, query) do
+      [quote_name(key), " = " | expr(value, sources, query)]
     end
 
-    defp update_op(:set, quoted_key, value, sources, query) do
-      [quoted_key, " = " | expr(value, sources, query)]
+    defp update_op(:inc, key, value, sources, query) do
+      quoted = quote_name(key)
+      [quoted, " = ", quoted, " + " | expr(value, sources, query)]
     end
 
-    defp update_op(:inc, quoted_key, value, sources, query) do
-      [quoted_key, " = ", quoted_key, " + " | expr(value, sources, query)]
-    end
-
-    defp update_op(command, _quoted_key, _value, _sources, query) do
+    defp update_op(command, _key, _value, _sources, query) do
       error!(query, "Unknown update operation #{inspect command} for MySQL")
     end
 
@@ -510,7 +500,6 @@ if Code.ensure_loaded?(Mariaex) do
           [] -> []
           list -> [?\s, ?(, list, ?)]
         end
-
       [["CREATE TABLE ",
         if_do(command == :create_if_not_exists, "IF NOT EXISTS "),
         quote_table(table.prefix, table.name),
@@ -629,8 +618,12 @@ if Code.ensure_loaded?(Mariaex) do
     defp column_options(opts) do
       default = Keyword.fetch(opts, :default)
       null    = Keyword.get(opts, :null)
-      [default_expr(default), null_expr(null)]
+      comment = Keyword.get(opts, :comment)
+      [default_expr(default), null_expr(null), comments(comment)]
     end
+
+    defp comments(c) when is_binary(c), do: " COMMENT '" <> escape_string(c) <> "'"
+    defp comments(_), do: []
 
     defp null_expr(false), do: " NOT NULL"
     defp null_expr(true), do: " NULL"
@@ -642,10 +635,6 @@ if Code.ensure_loaded?(Mariaex) do
       do: [" DEFAULT '", escape_string(literal), ?']
     defp default_expr({:ok, literal}) when is_number(literal) or is_boolean(literal),
       do: [" DEFAULT ", to_string(literal)]
-    defp default_expr({:ok, %{} = map}) do
-      default = Ecto.Adapter.json_library().encode!(map)
-      [" DEFAULT ", [?', escape_string(default), ?']]
-    end
     defp default_expr({:ok, {:fragment, expr}}),
       do: [" DEFAULT ", expr]
     defp default_expr(:error),
@@ -699,7 +688,6 @@ if Code.ensure_loaded?(Mariaex) do
       do: quote_name(name)
 
     defp reference_column_type(:serial, _opts), do: "BIGINT UNSIGNED"
-    defp reference_column_type(:bigserial, _opts), do: "BIGINT UNSIGNED"
     defp reference_column_type(type, opts), do: column_type(type, opts)
 
     defp reference_on_delete(:nilify_all), do: " ON DELETE SET NULL"
@@ -765,8 +753,6 @@ if Code.ensure_loaded?(Mariaex) do
     defp ecto_to_db({:array, _}, query),
       do: error!(query, "Array type is not supported by MySQL")
     defp ecto_to_db(:id, _query),             do: "integer"
-    defp ecto_to_db(:serial, _query),         do: "bigint unsigned not null auto_increment"
-    defp ecto_to_db(:bigserial, _query),      do: "bigint unsigned not null auto_increment"
     defp ecto_to_db(:binary_id, _query),      do: "binary(16)"
     defp ecto_to_db(:string, _query),         do: "varchar"
     defp ecto_to_db(:float, _query),          do: "double"
