@@ -623,7 +623,7 @@ if Code.ensure_loaded?(Mariaex) do
     end
 
     defp comments(c) when is_binary(c), do: " COMMENT '" <> escape_string(c) <> "'"
-    defp comments(_), do: []
+    defp comments(_), do: ""
 
     defp null_expr(false), do: " NOT NULL"
     defp null_expr(true), do: " NULL"
